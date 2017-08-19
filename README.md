@@ -1,10 +1,15 @@
 
 #==============================#
 # hsTnI IPD Meta-analysis
-#==============================#
+#==============================
+
+
 Andrew R Chapman
+
 University of Edinburgh
+
 a.r.chapman@ed.ac.uk
+
 19.08.2017
 
 R code is supplied to provide an overview of key steps in analysis
