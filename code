@@ -1,0 +1,1455 @@
+                                        #==============================#
+                                           # hsTnI IPD Meta-analysis
+                                        #==============================#
+
+                                                Andrew R Chapman
+                                            University of Edinburgh
+                                             a.r.chapman@ed.ac.uk
+                                                   24.03.2017
+                                           Updated 19.08/2017
+
+                        R code supplied to provide an overview of key steps in analysis
+              Code has been edited for readability and re-ordered as per manuscript and supplement
+               Where repeated analysis steps have taken place, only an example is shown for brevity
+
+#Require the following packages
+library(tidyr)
+library(caret)
+library(dplyr) 
+library(binom)
+library(grid)
+library(ggplot2)
+library(tableone)
+library(foreign)
+library(metafor)
+
+#Data:
+# 17 cohorts provided individual patient data, 2 cohorts provided summary two by two tables
+## IPD cohorts are structured as a data.frame with the following columns:
+
+# <- c("subject.id", "age", "gender", "symptom.to.sample.time", "chest.pain", "ecg.ischaemia", "smoker.yes", "known.diabetes", "known.htn", "known.hyperlipidaemia", "known.ihd", "previous.mi", "previous.pci", "previous.cabg", "previous.cva", "first.hstni", "peak.tni", "primary.outcome", "all.nstemi", "index.allinjury", "composite.30", "composite.1y", "death.30", "death.1y", "ref.assay", "ref.result", "cohort.name")
+
+#subject.id, age = numerical
+#gender = factor (M or F)
+#symptom.to.sample.time = numerical 
+#chest.pain:previous.cva = all factorial; yes (1) or no (0)
+#first.hstni = numerical (ng/L) rounded to 0dp
+#peak.tni = numerical (ng/L) rounded to 0dp
+#primary.outcome == differs per cohort as detailed in Table 1; yes (1) or no(0)
+#all.nstemi == Type 1 or Type 2 MI (1) or no MI (0)
+#index.allinjury == all tni elevation >99th centile (1) else (0)
+#composite.30 == type 1 or death at 30 days (1) else (0)
+#composite.1y == type 1 or death at 1 year (1) else (0)
+#death.30 == cardiac death at 30 days (1) else (0)
+#death.1y == cardiac death at 1 year (1) else (0)
+#ref.assay == reference assay (character)
+#ref.result == numerical (ng/L)
+#cohort.name == name of cohort (character)
+### All fields == NA if data missing
+
+#================
+# FUNCTIONS:
+#================
+#Table One
+#to create a summary of baseline demographic information for Table 1 and export as a CSV file
+
+table.one <- function(df){
+        
+        vars <- c("age", "gender", "chest.pain","symptom.to.sample.time",  
+                  "ecg.ischaemia", "smoker.yes", "known.diabetes", "known.htn", 
+                  "known.hyperlipidaemia", "known.ihd", "previous.mi", "previous.pci", 
+                  "previous.cabg", "previous.cva", "tni.neg", "tni.pos","primary.outcome")
+        
+        for(i in c(3,5:15,18,22)){
+                df[,i] <- factor(df[,i])       
+        }
+        df.table <- CreateTableOne(vars=vars, data=df, includeNA = FALSE, test = TRUE, testApprox = chisq.test, argsApprox = list(correct = TRUE), testExact = fisher.test)
+        df2.table <- print(df.table, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+        
+        name <- paste(unique(df[27]),".table.csv",sep="")
+        write.csv(df2.table, file=name)
+        
+}
+        
+#Proportions and Event Rate
+#to generate descriptive table of cohort information for Table 2:
+desc.table <- 
+        function(df, df2, name) {
+                #df = a dataframe including all patients per cohort
+                #df2 = a dataframe including only those patients <99th centile per cohort
+                #name = character vector with name of cohort
+               
+                #Events.all - percentage event rate in all patients
+                Events.all <- (sum(df$primary.outcome)/nrow(df))*100
+                
+                #Events.less.99 - percentage event rate in patients <99th centile
+                Events.less.99 <- (sum(df2$primary.outcome)/nrow(df2))*100
+                
+                #create 2x2 table
+                #column df$less.5 is coded as hsTnI <5 == 0, hsTnI ≥5 ==1)
+
+                df2 <- confusionMatrix(df$less.5, df$primary.outcome, positive="1")
+                
+                #create bayesian estimate of NPV using df2 (a 2x2 table generated above)
+
+                npv5 <- binom.bayes(x=df2$table[1,1], n=df2$table[1,2]+df2$table[1,1], conf.level=0.95, type=c("central"), prior.shape1=0.5, prior.shape2=0.5, tol=1e-9)
+                
+                #extract coefficients and round
+                mean <- round(npv5$mean * 100, digits=1)
+                lower <- round(npv5$lower * 100, digits=1)
+                upper <- round(npv5$upper * 100, digits=1)
+                
+                #determine proportion less than 5 from full cohort 
+                less.5 <- round(((nrow(df)-sum(df$less.5))/nrow(df)*100),digits=1)
+                
+                #print name of assay used per cohort
+                assay.name <- print(df$ref.assay[1])
+                
+                #save as final.table
+                final.table <- data.frame(name,Events.all,Events.less.99,mean,lower,upper,less.5,assay.name)
+        }
+
+# Generate Cohort level 2x2 summary and Bayesian diagnostic parameters for Supplementary Table  
+dx.table <- function(df,name){
+        #df = data frame containing cohort information from patients <99th centile
+        #column names defined as per initial description
+        #name = “name of cohort”
+        
+        df2 <- confusionMatrix(df$less.5, df$primary.outcome, positive="1")
+        npv5 <- binom.bayes(x=df2$table[1,1], n=df2$table[1,2]+df2$table[1,1], conf.level=0.95, type=c("central"), prior.shape1=0.5, prior.shape2=0.5, tol=1e-9)
+        
+        Group <- name
+        TP <- df2$table[2,2]
+        FP <- df2$table[2,1]
+        TN <- df2$table[1,1]
+        FN <- df2$table[1,2]
+        n <- df2$table[1,1]+df2$table[1,2]+df2$table[2,1]+df2$table[2,2]
+        npvtest <- npv5$mean * 100
+        npvlower <- npv5$lower * 100
+        npvupper <- npv5$upper * 100
+        
+        dx.table <-  data.frame(Group,TP,FP,TN,FN,npvtest,npvlower,npvupper)
+        
+} 
+
+# Generate NPV, TN and FN data per cohort and format ready to plot in Figure 1
+forest.table <- function(df,name,subgroup){
+        
+        #df = dataframe with individual raw patient data per row
+        #name = cohort name for forest plot
+        #subgroup = assay used for adjudication 
+        
+        df.matrix.5 <- confusionMatrix(df$less.5, df$primary.outcome, positive="1")
+        df.npv5 <- binom.bayes(x=df.matrix.5$table[1,1], n=df.matrix.5$table[1,2]+df.matrix.5$table[1,1], conf.level=0.95, type=c("central"), prior.shape1=0.5, prior.shape2=0.5, tol=1e-9)
+        Group <- name
+        test <- df.npv5$mean * 100
+        lower <- df.npv5$lower * 100
+        upper <- df.npv5$upper * 100
+        n <- df.matrix.5$table[1,1]+df.matrix.5$table[1,2]+df.matrix.5$table[2,1]+df.matrix.5$table[2,2]
+        subgroup <- subgroup
+        FN <- df.matrix.5$table[1,2]
+        TN <- df.matrix.5$table[1,1]
+        df.master <- data.frame(Group,test,lower,upper,n,subgroup,FN,TN)
+}
+
+# Generate NPV, TN and FN data per cohort where only summary data available
+forest.npv.summary <- function(df, name, subgroup){
+        #df = dataframe with 2x2 data (TN, FN, TP, FP)
+        #name = cohort name for forest plot
+        #subgroup = ‘subgroup’ included for consistency  
+
+        npv <- binom.bayes(x=sum(df$TN), n=(sum(df$TN)+sum(df$FN)), conf.level=0.95, type=c("central"), prior.shape1=0.5, prior.shape2=0.5, tol=1e-9)
+        
+        Group <- name
+        test <- npv$mean * 100
+        lower <- npv$lower * 100
+        upper <- npv$upper * 100
+        n <- (sum(df$TP)+sum(df$FN)+sum(df$FP)+sum(df$TN))
+        subgroup <- subgroup
+        FN <- (sum(df$FN))
+        TP <- (sum(df$TP))
+        summary.master <- data.frame(Group,test,lower,upper,n,subgroup,FN,TP)
+}
+
+#To extract 2x2 data from raw dataframe 
+extract.2x2 <- function(df, outcome){
+        #df = dataframe with individual patient data per row
+        #outcome = "nameofoutcome" e.g. "primary.outcome"
+        
+        df.matrix.5 <- confusionMatrix(df$less.5, df[[outcome]], positive="1")
+        df2 <- c(df.matrix.5$table[2,2],df.matrix.5$table[1,2],df.matrix.5$table[2,1],df.matrix.5$table[1,1])
+}
+
+#To extract missed cases and save CSV of missed events [Table S1]
+missed.cases <- function(df,filename) {
+        #df = data frame with individual patient data per row
+        #filename.csv = as wanting to save missed cases
+        #missed
+        df.missed <- subset(df, less.5==0&primary.outcome==1)
+        mycols <- c("subject.id", "age", "gender","symptom.to.sample.time", "chest.pain", "ecg.ischaemia","smoker.yes","known.diabetes","known.htn","known.hyperlipidaemia","known.ihd","previous.mi","previous.pci","previous.cabg","previous.cva","first.hstni","peak.tni","ref.assay","ref.result","primary.outcome", "death.30", "death.1y") 
+        df.missed <- df.missed[mycols]
+        
+        df.missed[c("Presenting symptom", "Index management","Reference assay (First Result)","Reference assay (Peak Result)", "Reference assay (URL)")] <- " " 
+        
+        write.csv(df.missed, file=filename)
+        
+        df.missed <- print(df.missed)
+}
+
+#to create a meta-estimate of NPV <5 in those <99th centile using the rma.glmm function of the metafor package
+metaestimate <- function(df, name, n_subgroup) {
+        
+        # DF - a dataframe with TP/FN/FP/TN and each cohort listed as a row. 
+        # Restricted to those <99th centile 
+        library(metafor)
+        
+        res <- rma.glmm(measure="PLO", xi=df$TN, ni=(df$TN + df$FN), data=df)
+        pred <- predict(res, transf=transf.ilogit, digits=3)
+        
+        Group <- name
+        test <- pred$pred * 100
+        lower <- pred$ci.lb * 100
+        upper <- pred$ci.ub * 100
+        n <- (sum(df$TP)+sum(df$FN)+sum(df$FP)+sum(df$TN))
+        subgroup <- n_subgroup
+        FN <- (sum(df$FN))
+        TN <- (sum(df$TN))
+        sum_df <- data.frame(Group,test,lower,upper,n,subgroup,FN,TN)
+        
+        return(sum_df)
+}
+
+#to create a meta-estimate of NPV and Sensitivity in all patients [Table S4]
+#rma.glmm function of the metafor package (NPV/Sensitivity)
+
+metaestimate.all <- function(df, name) {
+        # DF - a dataframe with columns labelled TP/FN/FP/TN
+        library(metafor)
+        
+        res <- rma.glmm(measure="PLO", xi=df$TN, ni=(df$TN + df$FN), data=df)
+        pred <- predict(res, transf=transf.ilogit, digits=3)
+        
+        s.res <- rma.glmm(measure="PLO", xi=df$TP, ni=(df$TP + df$FN), data=df)
+        s.pred <- predict(s.res, transf=transf.ilogit, digits=3)
+        
+        Group <- name
+        test <- pred$pred * 100
+        lower <- pred$ci.lb * 100
+        upper <- pred$ci.ub * 100
+        sens.t <- s.pred$pred * 100
+        sens.l <- s.pred$ci.lb * 100
+        sens.u <- s.pred$ci.ub * 100
+        n <- (sum(df$TP)+sum(df$FN)+sum(df$FP)+sum(df$TN))
+        TP <- (sum(df$TP))
+        FP <- (sum(df$FP))
+        TN <- (sum(df$TN))
+        FN <- (sum(df$FN))
+        sum_df <- data.frame(Group,TP,FP,TN,FN,test,lower,upper,sens.t,sens.l,sens.u)
+        
+        print(summary(res))
+        print(summary(s.res))
+        return(sum_df)
+}
+
+
+#Generate cohort level 2x2 data stratified by subgroup 
+#my list = a list of dataframes split by cohort and subset by group of interest 
+
+subgroup.2x2 <- function(mylist){
+        df.2x2 <- data.frame(name=seq(length(mylist)), TP=seq(length(mylist)),FN=seq(length(mylist)), FP=seq(length(mylist)), TN=seq(length(mylist)))
+        
+        for (i in c(1:length(mylist))){
+                
+                # restrict function to only those where TP events have taken place.
+                ## in subgroups without TP events, confusion matrix cannot form 2x2 and this is done manually 
+                if (sum(mylist[[i]][18] > 0)){
+                        
+                        #use extract.2x2 function defined above 
+                        c <- extract.2x2(mylist[[i]], "primary.outcome")
+                        name <- unique(mylist[[i]][[27]])
+                        TP <- c[1]
+                        FN <- c[2]
+                        FP <- c[3]
+                        TN <- c[4]
+                        df.2x2[i,] <- c(name,TP,FN,FP,TN) 
+                }
+                
+                else if(sum(mylist[[i]][18] == 0)){
+                        name <- unique(mylist[[i]][[27]])
+                        TP <- NA
+                        FN <- NA
+                        FP <- NA
+                        TN <- NA
+                        df.2x2[i,] <- c(name,TP,FN,FP,TN) 
+                } 
+        }
+        
+        print(df.2x2)
+        
+        return(df.2x2)
+        
+}
+#=========================
+# Generate Cohort Level Estimates of NPV
+#=========================
+# Example Cohort = HighSTEACS-V 
+# Primary Outcome = Type 1 MI, or Type 1 MI or Cardiac Death at 30d
+
+#less than 5
+shah$less.5 <- ifelse(shah$first.hstni<5,0,1)
+
+#over 99th centile
+shah$tni.pos  <- ifelse((shah$gender=="F"&shah$first.hstni>16)|(shah$gender=="M"&shah$first.hstni>34),1,0)
+shah$tni.pos <- as.character(shah$tni.pos)
+shah$tni.pos <- as.factor(shah$tni.pos)
+
+#less than 99th centile
+shah$tni.neg <- ifelse(shah$tni.pos==0,1,0)
+shah$tni.neg <- as.character(shah$tni.neg)
+shah$tni.neg <- as.factor(shah$tni.neg)
+
+#subset to <99th centile
+shah.all <- shah
+shah <- subset(shah, tni.neg==1)
+
+#descriptive table
+shah.desc.table <- desc.table(df=shah.all,df2=shah, name="HighSTEACS-V")
+
+#NPV for forest plot
+shah.master <- forest.table(shah, name="HighSTEACS-V", subgroup="Cohort - hsTnI reference")
+
+#parameters for table
+shah.dx.table <- dx.table(shah, name="HighSTEACS-V")
+
+#missed cases
+shah.missed <- missed.cases(df=shah, filename="shah.missed.csv")
+
+#### Above steps are repeated for all cohorts ###
+
+#===============================
+# TABLES
+#===============================
+#===============================
+# Table 1: Summary of all cohorts  
+#===============================
+#write table 
+## NB Cohorts providing summary data provided a baseline characteristics table and a false data.frame was created
+
+#list all dataframes for table one
+table.df <- list(lancet.all, gender.all, circ.all, adaptbr.all, impact.all, romi.all, ring.all, korley.all, edacs.all, adaptrct.all, adaptch.all, stenocardia.all, bacc.all, trust.all, tiamo.all, stockport.all, manchester.all, apace.tab.all, utropia.tab.all)
+
+#generate table one for individual cohorts
+lapply(table.df, table.one)
+
+#generate a summary column for table one
+all.tab <- rbind(lancet.all, gender.all, circ.all, adaptbr.all, impact.all, romi.all, ring.all, korley.all, edacs.all, adaptrct.all, adaptch.all, stenocardia.all, bacc.all, trust.all, tiamo.all, apace.tab.all, utropia.tab.all, stockport.all, manchester.all)
+
+vars <- c("age", "gender", "chest.pain","symptom.to.sample.time",  
+          "ecg.ischaemia", "smoker.yes", "known.diabetes", "known.htn", 
+          "known.hyperlipidaemia", "known.ihd", "previous.mi", "previous.pci", 
+          "previous.cabg", "previous.cva", "tni.neg", "tni.pos","primary.outcome")
+
+df.table <- CreateTableOne(vars=vars, data=all.tab, includeNA = FALSE, test = TRUE, argsApprox = list(correct = TRUE))
+df2.table <- print(df.table, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+write.csv(df2.table, file="summary.tab.csv")
+
+#extract median and IQR of symptom to sample time
+summary(all.tab$symptom.to.sample.time)
+
+#for number <99th centile 
+all.tab.99 <- subset(all.tab, tni.neg==1)
+all.tab.99 <- nrow(all.tab.99)
+
+#===================
+# Derive meta-estimate of NPV < 5 ng/L
+#===================
+#Extract row of 2x2 data from raw dataset 
+shah2x2 <- extract.2x2(shah, "primary.outcome") 
+gender2x2 <- extract.2x2(gender, "primary.outcome") 
+chapman2x2 <- extract.2x2(chapman, "primary.outcome") 
+trust2x2 <- extract.2x2(trust, "primary.outcome") 
+adaptbr2x2 <- extract.2x2(adaptbr, "primary.outcome") 
+impact2x2 <- extract.2x2(impact, "primary.outcome") 
+romi2x2 <- extract.2x2(romi, "primary.outcome")
+ring2x2 <- extract.2x2(ring, "primary.outcome") 
+hopkins2x2 <- extract.2x2(hopkins, "primary.outcome") 
+tiamo2x2 <- extract.2x2(tiamo, "primary.outcome") 
+edacs2x2 <- extract.2x2(edacs, "primary.outcome") 
+adaptrct2x2 <- extract.2x2(adaptrct, "primary.outcome") 
+adaptch2x2 <- extract.2x2(adaptch, "primary.outcome") 
+bacc2x2 <- extract.2x2(bacc, "primary.outcome") 
+stenocardia2x2 <- extract.2x2(stenocardia, "primary.outcome") 
+stockport2x2 <- extract.2x2(stockport, "primary.outcome") 
+manchester2x2 <- extract.2x2(manchester, "primary.outcome") 
+
+#Generate row of 2x2 data from aggregate sources
+apace2x2 <- c(apace.matrix.5[2,2],apace.matrix.5[1,2],apace.matrix.5[2,1],apace.matrix.5[1,1])
+utropia2x2 <- c(utropia.matrix.5[2,2],utropia.matrix.5[1,2],utropia.matrix.5[2,1],utropia.matrix.5[1,1])
+
+#bind all 2x2s for pooled estimate
+df <- rbind(shah2x2,gender2x2,chapman2x2,trust2x2,adaptbr2x2,impact2x2,romi2x2,ring2x2,hopkins2x2,tiamo2x2,apace2x2,edacs2x2,adaptrct2x2,adaptch2x2,utropia2x2,bacc2x2,stenocardia2x2, stockport2x2, manchester2x2)
+df <- as.data.frame(df)
+colnames(df) <- c("TP","FN","FP","TN")
+rownames(df) <-c("shah","gender","chapman","trust","adaptbr","impact","romi","ring","hopkins","tiamo","apace","edacs","adaptrct","adaptch","utropia","bacc","stenocardia","stockport", "manchester")
+
+#save df for subgroup analysis based on adjudicating assay
+df.assay <- df
+
+#generate meta-estimate with above DF using rma.glmm (metafor)
+summary.master <- metaestimate(df, "OVERALL", "Summary")
+
+#===============================
+# Table 2 - Cohort size and prevalence of primary outcomes
+#===============================
+
+master.desc.table <- rbind(shah.desc.table, gender.desc.table, chapman.desc.table, trust.desc.table, adaptbr.desc.table, impact.desc.table, romi.desc.table, ring.desc.table, hopkins.desc.table, tiamo.desc.table, apace.desc.table, edacs.desc.table, adaptrct.desc.table, adaptch.desc.table, utropia.desc.table, bacc.desc.table, stenocardia.desc.table, stockport.desc.table, manchester.desc.table)
+
+# derive less 99th centile event rate as below 
+n.99 <- rbind(shah.all, gender.all, chapman.all, adaptbr.all, impact.all, romi.all, ring.all, hopkins.all, edacs.all, adaptrct.all, adaptch.all, stenocardia.all, bacc.all, trust.all, tiamo.all, stockport.all, manchester.all)
+n.99 <- subset(n.99, tni.neg==1)
+
+#add all primary outcome plus APACE (TP/FN) plus UTROPIA (TP/FN)
+n.99 <- sum(n.99$primary.outcome) + 109 + 8 + 19 + 3
+
+# derive number <5 
+n.less.5  <- subset(all.tab, less.5==0) 
+
+#add number <5 plus APACE <5 and UTROPIA <5
+n.less.5 <- nrow(n.less.5) + 1108 + 774
+
+summary <- data.frame("SUMMARY", round((((sum(all.tab$primary.outcome))/(nrow(all.tab)))*100),digits=1), round(((n.99/(all.tab.99))*100),digits=1), round(summary.master$test,digits=1), round(summary.master$lower,digits=1), round(summary.master$upper,digits=1), round(((n.less.5/(nrow(all.tab)))*100),digits=1), " ")
+colnames(summary) <- c("name", "Events.all", "Events.less.99", "mean", "lower", "upper", "less.5", "assay.name")
+
+master.desc.table <- rbind(master.desc.table, summary)
+
+#reorder as per variance
+master.desc.table <- master.desc.table[c(1,15,3,2,12,17,5,6,7,9,14,13,8,10,11,16,4,18:20),]
+
+#paste npvs
+master.desc.table$npv <- paste(master.desc.table$mean," (",master.desc.table$lower,"-",master.desc.table$upper,") ", sep="")
+
+#remove redundant cols
+master.desc.table <- master.desc.table[,c(1:3,9,7,8)]
+
+#round
+for (i in 2:3){
+        master.desc.table[i] <- round(master.desc.table[i], digits=1)
+}
+
+#===============================
+# FIGURES
+#===============================
+#==========================
+# Paper – Figure 1: Central Forest Plot of NPV by cohort
+#==========================
+library(gridExtra)
+
+#create placeholder
+Group <- "Cohort - hsTnI reference"
+test <- NA
+lower <- NA
+upper <- NA
+n <- NA
+subgroup <- NA
+FN <- NA
+TN <- NA
+space <- data.frame(Group,test,lower,upper,n,subgroup,FN,TN)
+
+Group <- "Cohort - contemporary reference"
+space1 <- data.frame(Group,test,lower,upper,n,subgroup,FN,TN)
+
+Group <- "Cohort - hsTnT reference"
+space2 <- data.frame(Group,test,lower,upper,n,subgroup,FN,TN)
+
+Group <- " "
+space3 <- data.frame(Group,test,lower,upper,n,subgroup,FN,TN)
+
+#merge with placeholders for plotting
+fig1 <- rbind(space, shah.master, utropia.master, chapman.master, gender.master, edacs.master, space1, stenocardia.master, adaptbr.master, impact.master, romi.master, hopkins.master, adaptch.master, adaptrct.master, ring.master, space2, tiamo.master, apace.master, bacc.master, trust.master, stockport.master, manchester.master, space3, summary.master)
+fig1$Group <- factor(fig1$Group)
+fig1$prop <- fig1$n
+fig1$size <- ifelse(fig1$n>5000,15,
+                    ifelse(fig1$n>3000&fig1$n<5000,12,
+                           ifelse(fig1$n>1000&fig1$n<3000,6,
+                                  ifelse(fig1$n<1000&fig1$n>0,3,1))))
+fig1$prev <- paste0(round(fig1$test,1)," ","(",round(fig1$lower,1),"-",round(fig1$upper,1),")")
+fig1$colour <- c("white", "#AF523D","#AF523D","#AF523D","#AF523D","#AF523D", "white","#4A6A7F","#AF523D","#AF523D","#AF523D","#AF523D","#AF523D","#AF523D","#4A6A7F","white","#4A6A7F","#4A6A7F","#4A6A7F","#4A6A7F","#4A6A7F","#4A6A7F","#4A6A7F","black")
+
+for (i in 2:4){
+        fig1[i] <- round(fig1[i], digits=1)
+}
+
+theme_set(theme_bw())
+theme_update(
+        axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size=14),
+        axis.title.x = element_text(size=14),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(0,0,0,0), "lines")
+)
+
+p1 <- ggplot(fig1,aes(test,rev(Group),)) + 
+        geom_vline(xintercept = 99.5, size = 0.4, linetype = 2, col="dark gray") +
+        geom_errorbarh(aes(xmax = upper, xmin = lower), size=0.4, height = 0.15, col="black") +
+        geom_segment(aes(x=96.9,xend=100,y=4, yend=4), arrow=arrow(length = unit(2.5, units="mm"), ends="first"),size=0.37,col="#333333",alpha=0.1)+
+        geom_segment(aes(x=96.9,xend=99.9,y=3, yend=3), arrow=arrow(length = unit(2.5, units="mm"), ends="first"),size=0.37,col="#333333",alpha=0.1)+
+        geom_point(size=(fig1$size), shape=18, col=fig1$colour) +
+        geom_hline(yintercept=1.75,linetype = "longdash")+
+        geom_hline(yintercept=8.75,linetype = "longdash")+
+        geom_hline(yintercept=17.75,linetype = "longdash")+
+        geom_hline(yintercept=23.75,linetype = "longdash")+
+        scale_x_continuous(breaks = seq(90,100,.5), labels = seq(90,100,.5)) +
+        labs(x="Negative Predictive Value (95% CI)", y="")+
+        coord_cartesian(ylim=c(-0.1,26.5))+
+        xlim(96.9,100.2)
+p1
+
+
+fig1$TN[ is.na(fig1$TN)] <- ""
+fig1$FN[ is.na(fig1$FN)] <- ""
+fig1$n[ is.na(fig1$n)] <- ""
+
+#create data_table 
+a <- rep(c(letters[1:26]),4)
+b <- rep(c(1:4),each=26)
+c <- c("", "", "", "HighSTEACS-V", 
+       "UTROPIA", "HighSTEACS-S", "HighSTEACS-P", "EDACS", "", 
+       "STENOCARDIA", "ADAPT-B", "IMPACT", "ROMI", "HOPKINS", "ADAPT-C",  
+       "ADAPT-RCT", "RING", "", "TI-AMO", "APACE", 
+       "BACC", "TRUST", "STOCKPORT", "MANCHESTER", "","","","",fig1$FN,"","",fig1$TN, "","",fig1$n)
+d <- as.data.frame(cbind(a,b,c))
+d$a <- factor(d$a, levels=c(letters[26:1]))
+
+data_table <- ggplot(d, aes(x = d$b, y = d$a, label = format(d$c, nsmall = 1))) +
+        geom_text(size = 7, hjust=0, vjust=0) + theme_bw()  + 
+        geom_hline(yintercept=1.75,linetype = "longdash")+
+        geom_hline(yintercept=8.75,linetype = "longdash")+
+        geom_hline(yintercept=17.75,linetype = "longdash")+
+        geom_hline(yintercept=23.75,linetype = "longdash")+
+        theme(panel.grid.major = element_blank(), 
+              legend.position = "none",
+              panel.border = element_blank(), 
+              axis.text.x = element_text(colour="white"),#element_blank(),
+              axis.text.y = element_blank(), 
+              axis.ticks = element_line(colour="white"),#element_blank(),
+              plot.margin = unit(c(0,0,0,0), "lines")) +
+        labs(x="",y="") +
+        coord_cartesian(xlim=c(1,5),ylim=c(-0.2,26.5))
+
+f <- data_table
+f <- f + annotate("text", x = 1, y = 24.3, label = "Adjudication with hsTnI assay", size=7, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 1, y = 18.3, label = "Adjudication with contemporary assay", size=7, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 1, y = 9.3, label = "Adjudication with hsTnT assay", size=7, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 1, y = 1.3, label = "Summary", size=7, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 1, y = 25.5, label = "Group", size=7, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 2, y = 25.5, label = "FN", size=7, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 3, y = 25.5, label = "TN", size=7, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 4, y = 25.5, label = "Population (n)", size=7, fontface='bold',hjust=0)
+f
+
+p2 <- grid.arrange(f, p1, ncol=2)
+
+
+#================================#
+#Generate meta-estimate for secondary endpoint of All NSTEMI
+#================================#
+### Includes all cohorts of raw data where NSTEMI available
+### Excludes UTROPIA, TRUST (no NSTEMI outcome)
+
+#Extract row of 2x2 data from raw dataset 
+shah2x2.nstemi <- extract.2x2(shah, "all.nstemi") 
+gender2x2.nstemi <- extract.2x2(gender, "all.nstemi") 
+chapman2x2.nstemi <- extract.2x2(chapman, "all.nstemi")  
+adaptbr2x2.nstemi <- extract.2x2(adaptbr, "all.nstemi") 
+impact2x2.nstemi <- extract.2x2(impact, "all.nstemi") 
+romi2x2.nstemi <- extract.2x2(romi, "all.nstemi")
+ring2x2.nstemi <- extract.2x2(ring, "all.nstemi") 
+hopkins2x2.nstemi <- extract.2x2(hopkins, "all.nstemi") 
+tiamo2x2.nstemi <- extract.2x2(tiamo, "all.nstemi") 
+edacs2x2.nstemi <- extract.2x2(edacs, "all.nstemi") 
+adaptrct2x2.nstemi <- extract.2x2(adaptrct, "all.nstemi") 
+adaptch2x2.nstemi <- extract.2x2(adaptch, "all.nstemi") 
+bacc2x2.nstemi <- extract.2x2(bacc, "all.nstemi") 
+stenocardia2x2.nstemi <- extract.2x2(stenocardia, "all.nstemi") 
+stockport2x2.nstemi <- extract.2x2(stockport, "all.nstemi") 
+manchester2x2.nstemi <- extract.2x2(manchester, "all.nstemi")
+
+#bind all 2x2s for pooled estimate
+##note includes APACE as endpoint is All.NSTEMI 
+df <- rbind(shah2x2.nstemi,gender2x2.nstemi,chapman2x2.nstemi,adaptbr2x2.nstemi,impact2x2.nstemi,romi2x2.nstemi,ring2x2.nstemi,hopkins2x2.nstemi,tiamo2x2.nstemi,apace2x2,edacs2x2.nstemi,adaptrct2x2.nstemi,adaptch2x2.nstemi,bacc2x2.nstemi,stenocardia2x2.nstemi, stockport2x2.nstemi, manchester2x2.nstemi)
+df <- as.data.frame(df)
+colnames(df) <- c("TP","FN","FP","TN")
+
+#determine total population size eligible for this analysis
+sum(df)
+
+#generate metaestimate for NSTEMI
+nstemi.master <- metaestimate(df, "NSTEMI-Outcome", "Summary")
+
+#=========================
+# Figure 2 - Derivation of meta-estimates in pre-specified subgroups
+#=========================
+#merge dataset
+master <- rbind(shah, gender, chapman, adaptbr, impact, romi, ring, hopkins, edacs, adaptrct, adaptch, stenocardia, bacc, trust, tiamo, stockport, manchester)
+master$less.5 <-ifelse(master$first.hstni<5,0,1)
+
+#add columns for symptom onset and age
+master$less.2hr.sx <- ifelse(master$symptom.to.sample.time<=120,1,0)
+master$over.65 <- ifelse(master$age>65,1,0)
+
+#------------
+#1) Men
+#------------
+men <- subset(master, gender=="M")
+mylist <- split(men, men$cohort.name)
+
+#generate 2x2 estimates per cohort
+men2x2 <- subgroup.2x2(mylist)
+
+#generate APACE and UTROPIA [aggregate data rows]
+apace.men.2x2 <- c("APACE", apace$Less.than.99.Men[1],apace$Less.than.99.Men[4],apace$Less.than.99.Men[2],apace$Less.than.99.Men[3])
+utropia.men.2x2 <- c("utropia", utropia$Less.than.99.Men[1],utropia$Less.than.99.Men[4],utropia$Less.than.99.Men[2],utropia$Less.than.99.Men[3])
+
+#merge master and aggregates
+men.2x2.final <- rbind(men2x2, apace.men.2x2, utropia.men.2x2) 
+
+for (i in 2:5){
+        men.2x2.final[,i] <- as.numeric(men.2x2.final[,i])
+}
+
+men.master <- metaestimate(men.2x2.final, "Men", "Subgroup")
+
+#------------
+#2) Women
+#------------
+women <- subset(master, gender=="F")
+mylist <- split(women, women$cohort.name)
+
+#generate 2x2 estimates per cohort
+women2x2 <- subgroup.2x2(mylist)
+
+#generate APACE and UTROPIA [aggregate data rows]
+apace.women.2x2 <- c("APACE", apace$Less.than.99.Women[1],apace$Less.than.99.Women[4],apace$Less.than.99.Women[2],apace$Less.than.99.Women[3])
+utropia.women.2x2 <- c("utropia", utropia$Less.than.99.Women[1],utropia$Less.than.99.Women[4],utropia$Less.than.99.Women[2],utropia$Less.than.99.Women[3])
+
+#merge master and aggregates
+women.2x2.final <- rbind(women2x2, apace.women.2x2, utropia.women.2x2) 
+
+for (i in 2:5){
+        women.2x2.final[,i] <- as.numeric(women.2x2.final[,i])
+}
+
+women.master <- metaestimate(women.2x2.final, "Women", "Subgroup")
+
+### Above steps repeated for all pre-specified subgroups ###
+### master dataframe subset by subgroup of interest
+### split by cohort name
+### 2x2 generated using subgroup.2x2(mylist)
+### Summary 2x2 rows added for those providing summary data
+### Meta-estimate generated ready for plot using metaestimate() function
+### Plotted in ggplot2
+
+#======================
+# Figure 2: Meta-estimates of NPV by subgroup
+#======================
+fig1 <- rbind(space, age.over.65.master, age.under.65.master, men.master, women.master, ihd.master, no.ihd.master, less.2hr.sx.master, over.2hr.sx.master, ischaemic.ecg.master, no.ischaemic.ecg.master)
+fig1$Group <- factor(fig1$Group)
+fig1$prop <- fig1$n
+fig1$size <- ifelse(fig1$n>5000,10,
+                    ifelse(fig1$n>3000&fig1$n<5000,7,
+                           ifelse(fig1$n>1000&fig1$n<3000,4,
+                                  ifelse(fig1$n<1000&fig1$n>0,2,1))))
+fig1$prev <- paste0(round(fig1$test,1)," ","(",round(fig1$lower,1),"-",round(fig1$upper,1),")")
+fig1$colour <- c("#AF523D")
+
+for (i in 2:4){
+        fig1[i] <- round(fig1[i], digits=1)
+}
+
+theme_set(theme_bw())
+theme_update(
+        axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size=14),
+        axis.title.x = element_text(size=14),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(0,0,0,0), "lines")
+)
+
+
+p1 <- ggplot(fig1,aes(test,rev(Group),)) + 
+        geom_errorbarh(aes(xmax = upper, xmin = lower), size=0.4, height = 0.15, col="black") +
+        geom_segment(aes(x=99.5,y=-0.1,xend=99.5,yend=11),colour="dark gray",size=0.2, linetype=2)+
+        geom_segment(aes(x=96.9,xend=99.1,y=2, yend=2), arrow=arrow(length = unit(2.5, units="mm"), ends="first"),size=0.365,alpha=0.3,col="#333333")+
+        geom_point(size=(fig1$size), shape=18, col=fig1$colour) +
+        geom_hline(yintercept=2.5,linetype = "longdash")+
+        geom_hline(yintercept=4.5,linetype = "longdash")+
+        geom_hline(yintercept=6.5,linetype = "longdash")+
+        geom_hline(yintercept=8.5,linetype = "longdash")+
+        scale_x_continuous(breaks = seq(90,100,.5), labels = seq(90,100,.5)) +
+        labs(x="Negative Predictive Value (95% CI)", y="")+
+        coord_cartesian(xlim=c(96.9,100.2),ylim=c(-0.1,12))+
+        annotate("rect", xmin = 99.2, xmax = 99.6, ymin = -0.1, ymax = 11,
+                 alpha = .2, fill="light grey")
+
+p1
+
+#once plotted, remove NA to create blank space in data_table
+fig1$TN[ is.na(fig1$TN)] <- ""
+fig1$FN[ is.na(fig1$FN)] <- ""
+fig1$n[ is.na(fig1$n)] <- ""
+fig1$prev[ fig1$prev=="NA (NA-NA)"] <- ""
+
+a <- rep(c(letters[1:12]),6)
+b <- rep(c(1:6),each=12)
+c <- c("", "", "Age over 65", "Age under 65", "Men", "Women", "Known IHD", "No Known IHD", "< 2hr symptoms", "> 2hr symptoms", 
+       "Ischaemic ECG", "Non-ischaemic ECG",   "","","","","","","","","","","","", "", fig1$FN, "", fig1$TN, "", fig1$n, "", fig1$prev)
+d<- as.data.frame(cbind(a,b,c))
+d$a <- factor(d$a, levels=c(letters[12:1]))
+
+data_table <- ggplot(d, aes(x = d$b, y = d$a, label = format(d$c, nsmall = 1))) +
+        geom_text(size = 6, hjust=0, vjust=0) + theme_bw()  + 
+        geom_hline(yintercept=2.5,linetype = "longdash")+
+        geom_hline(yintercept=4.5,linetype = "longdash")+
+        geom_hline(yintercept=6.5,linetype = "longdash")+
+        geom_hline(yintercept=8.5,linetype = "longdash")+
+        theme(panel.grid.major = element_blank(), 
+              legend.position = "none",
+              panel.border = element_blank(), 
+              axis.text.x = element_text(colour="white"),#element_blank(),
+              axis.text.y = element_blank(), 
+              axis.ticks = element_line(colour="white"),#element_blank(),
+              plot.margin = unit(c(0,0,0,0), "lines")) +
+        labs(x="",y="") +
+        coord_cartesian(xlim=c(1,7.5),ylim=c(-0.175,12))
+
+f <- data_table
+f <- f + annotate("text", x = 1, y = 11, label = "Group", size=6.5, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 3, y = 11, label = "FN", size=6.5, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 4, y = 11, label = "TN", size=6.5, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 5, y = 11, label = "Total (n)", size=6.5, fontface='bold',hjust=0)
+f <- f + annotate("text", x = 6, y = 11, label = "NPV (95% CI)", size=6.5, fontface='bold',hjust=0)
+f
+t3 <- grid.arrange(f, p1, ncol=2)
+
+#===============================
+# Figure 3: Meta-estimate of the optimal threshold in cohorts with raw data 
+#===============================
+# merge all cohorts where raw data available
+# all dataframes standardised prior to and checked after merging 
+
+population <- rbind(shah.all, gender.all, chapman.all, adaptbr.all, impact.all, romi.all, ring.all, hopkins.all, edacs.all, adaptrct.all, adaptch.all, stenocardia.all, bacc.all, tiamo.all, trust.all, stockport.all, manchester.all)
+
+#==============================
+# NPV plot with % ruled out
+#==============================
+for (i in 1:15) {
+        population[paste("less.", i,sep="")] <- ifelse(population$first.hstni<=i,0,1)
+}
+
+mylist <- split(population, population$cohort.name)
+
+temp <- NULL
+dftest <- data.frame(name=NA, TP=NA, FN=NA, FP=NA, TN=NA)
+
+npv.cohort <- function(tni){
+        #x = less than e.g (less.1)
+        
+        for(i in c(1:length(mylist))){
+                df <- mylist[[i]]
+                name <- unique(mylist[[i]][[27]])
+                temp  <- confusionMatrix(df[[tni]], df$primary.outcome,positive="1") 
+                temp <- c(name, temp[[2]][4],temp[[2]][3],temp[[2]][2],temp[[2]][1])
+                dftest[i,] <- temp
+                
+        }
+        print(dftest)
+        return(dftest)
+}
+
+
+n1 <- npv.cohort("less.1")
+n2 <- npv.cohort("less.2")
+n3 <- npv.cohort("less.3")
+n4 <- npv.cohort("less.4")
+n5 <- npv.cohort("less.5")
+n6 <- npv.cohort("less.6")
+n7 <- npv.cohort("less.7")
+n8 <- npv.cohort("less.8")
+n9 <- npv.cohort("less.9")
+n10 <- npv.cohort("less.10")
+n11 <- npv.cohort("less.11")
+n12 <- npv.cohort("less.12")
+n13 <- npv.cohort("less.13")
+n14 <- npv.cohort("less.14")
+n15 <- npv.cohort("less.15")
+
+npvdataframe <- list(n1,n2,n3,n4,n5,n6,n7,n8,n9,n10,n11,n12,n13,n14,n15)
+
+#change cols to numeric
+for (i in 1:15){
+        for (t in 2:5){
+                npvdataframe[[i]][,t]<- as.numeric(npvdataframe[[i]][,t])
+        }
+}
+
+#generate meta-estimate per troponin threshold
+npv <- data.frame(Group=NA, TP=NA, FP=NA, TN=NA, FN=NA,  test=NA, lower=NA, upper=NA, sens.t=NA, sens.l=NA, sens.u=NA)
+
+for (i in 1:15){
+        temp <- metaestimate.all(npvdataframe[[i]], i)
+        npv[i,] <- temp
+}
+
+
+#generate prop data per threshold
+
+prop <- data.frame(troponin = 1:15, prop = NA)
+
+for (i in 1:15){
+        a <- (sum(npvdataframe[[i]]$TN) + sum(npvdataframe[[i]]$FN)) / (nrow(population))
+        a <- a * 100 
+        prop[i,] <- c(i, a)
+}
+
+prop <- prop[,2]
+
+npv.1 <- cbind(npv,prop)
+
+
+#=======================
+#NPV in those without ischaemia on the ECG
+#=======================
+# create column for each troponin threshold upto 15 ng/L
+
+population <- population[ !is.na(population$ecg.ischaemia),]
+
+for (i in 1:15) {
+        population[paste("less.x.", i,sep="")] <- ifelse(population$first.hstni<=i&population$ecg.ischaemia==0,0,1)
+}
+
+mylist <- split(population, population$cohort.name)
+
+temp <- NULL
+dftest <- data.frame(name=NA, TP=NA, FN=NA, FP=NA, TN=NA)
+
+npv.cohort <- function(tni){
+        #x = less than e.g (less.1)
+        
+        for(i in c(1:length(mylist))){
+                df <- mylist[[i]]
+                name <- unique(mylist[[i]][[27]])
+                temp  <- confusionMatrix(df[[tni]], df$primary.outcome,positive="1") 
+                temp <- c(name, temp[[2]][4],temp[[2]][3],temp[[2]][2],temp[[2]][1])
+                dftest[i,] <- temp
+                
+        }
+        print(dftest)
+        return(dftest)
+}
+
+n1 <- npv.cohort("less.x.1")
+n2 <- npv.cohort("less.x.2")
+n3 <- npv.cohort("less.x.3")
+n4 <- npv.cohort("less.x.4")
+n5 <- npv.cohort("less.x.5")
+n6 <- npv.cohort("less.x.6")
+n7 <- npv.cohort("less.x.7")
+n8 <- npv.cohort("less.x.8")
+n9 <- npv.cohort("less.x.9")
+n10 <- npv.cohort("less.x.10")
+n11 <- npv.cohort("less.x.11")
+n12 <- npv.cohort("less.x.12")
+n13 <- npv.cohort("less.x.13")
+n14 <- npv.cohort("less.x.14")
+n15 <- npv.cohort("less.x.15")
+
+npvdataframe <- list(n1,n2,n3,n4,n5,n6,n7,n8,n9,n10,n11,n12,n13,n14,n15)
+
+#change cols to numeric
+for (i in 1:15){
+        for (t in 2:5){
+                npvdataframe[[i]][,t]<- as.numeric(npvdataframe[[i]][,t])
+        }
+}
+
+#generate meta-estimate per troponin threshold
+npv.x <- data.frame(Group=NA, TP=NA, FP=NA, TN=NA, FN=NA, test=NA, lower=NA, upper=NA, sens.t=NA, sens.l=NA, sens.u=NA)
+
+for (i in 1:15){
+        temp <- metaestimate.all(npvdataframe[[i]], i)
+        npv.x[i,] <- temp
+}
+
+
+#generate prop data per threshold
+
+prop <- data.frame(troponin = 1:15, prop = NA)
+
+for (i in 1:15){
+        a <- (sum(npvdataframe[[i]]$TN) + sum(npvdataframe[[i]]$FN)) / (nrow(population))
+        a <- a * 100 
+        prop[i,] <- c(i, a)
+}
+
+prop <- prop[,2]
+
+npv.2 <- cbind(npv.x,prop)
+
+npv <- rbind(npv.1,npv.2)
+npv$group <- c(rep("All patients",15),rep("Non-ischaemic ECG",15))
+
+names(npv)[1] <- "troponin"
+names(npv)[6] <- "central"
+names(npv)[7] <- "ll"
+names(npv)[8] <- "ul"
+
+
+for (i in c(6:11)){
+        npv[,i] <- round(npv[,i],digits=1)
+}
+
+library(scales)
+
+p1 <- ggplot(data=npv, aes(x=troponin, y=central))+
+        geom_errorbar(aes(colour=group, ymin=ll, ymax = ul, width=0.4),position=position_dodge(width=0.5))+
+        geom_point(aes(colour=group),size=4,position=position_dodge(width=0.5))+
+        xlim(c(0.7,15))+ 
+        ylim(97,100.1)+
+        xlab(label="\n Troponin I concentration at presentation (ng/L)")+
+        ylab(label="Negative predictive value (95% CI) \n")+
+        scale_x_continuous(breaks=1:15, limits=c(0.4,15.6), labels=c("<2","<3","<4","<5","<6","<7","<8","<9","<10", "<11", "<12","<13","<14","<15","<16"))+
+        geom_vline(aes(xintercept=4), linetype=2,colour = "gray55")+
+        geom_hline(aes(yintercept=99.5), linetype=2,colour = "gray55")+
+        scale_colour_manual(values = alpha(c("All patients" = "#AF523D", "Non-ischaemic ECG" = "#48769B"), .85))+
+        theme_classic()+
+        theme(axis.title.x = element_text(size=14,face="bold"),axis.title.y = element_text(size=14,face="bold"))+
+        theme(panel.grid.major = element_line(colour = "gray",size=0.1), panel.grid.minor = element_line(colour = "gray",size=0.05))
+
+p1 <- p1+theme(axis.text.x = element_text(size=16,hjust=.5,vjust=.8,face="plain"),axis.text.y = element_text(size=16,hjust=.5,vjust=.8,face="plain"),legend.position="none")
+p1 <- p1+theme(axis.title.x = element_text(size=18,face="bold"),axis.title.y = element_text(size=18,face="bold"))
+p1 
+
+par(mfrow=c(2,1))
+
+p2 <- ggplot(npv, aes(x=troponin, y=prop)) +
+        geom_area(position="identity",aes(fill=group))+
+        scale_fill_manual(values = alpha(c("All patients" = "#AF523D", "Non-ischaemic ECG" = "#48769B"), .7))+
+        xlim(c(1,15))+ 
+        ylim(0,100)+
+        xlab(label="\n Troponin I concentration at presentation (ng/L)")+
+        ylab(label="Cumulative proportion classified as low risk (%) \n")+
+        scale_x_continuous(breaks=1:15, limits=c(1,15), labels=c("<2","<3","<4","<5","<6","<7","<8","<9","<10", "<11", "<12","<13","<14","<15","<16"))+
+        theme_classic()+theme(axis.title.x = element_text(size=14,face="bold"),axis.title.y = element_text(size=14,face="bold"))+
+        theme(panel.grid.major = element_line(colour = "gray",size=0.1), panel.grid.minor = element_line(colour = "gray",size=0.05))
+
+p2 <- p2+theme(axis.text.x = element_text(size=16,hjust=.5,vjust=.8,face="plain"),axis.text.y = element_text(size=16,hjust=.5,vjust=.8,face="plain"))
+p2 <- p2+theme(axis.title.x = element_text(size=18,face="bold"),axis.title.y = element_text(size=18,face="bold"), legend.position="none")
+p2 <- p2 + geom_segment(aes(x=1,y=45.7,xend=4,yend=45.7),colour="gray",linetype=2)
+p2 <- p2 + geom_segment(aes(x=4,y=0,xend=4,yend=45.7),colour="gray",linetype=2)
+p2
+
+#================================#
+#Supplementary Figure S1 - CONSORT Diagram 
+#================================#
+
+#================================#
+# Supplementary Figure S2 - Comparison of NPV estimates based on assay used for adjudication
+#================================#
+hstni <- c("lancet","gender","circ","edacs","utropia")
+hstnt <- c("apace","bacc","trust", "tiamo", "stockport", "manchester")
+contemp <- c("stenocardia", "adaptbr", "impact", "adaptch", "adaptrct", "ring", "romi", "korley")
+
+#================================#
+#For comparison of NPV estimates based on assessment of bias
+#================================#
+low <- c("lancet","gender","circ","edacs","utropia","tiamo","apace","bacc")
+high <- c("trust",  "stockport", "manchester", "stenocardia", "adaptbr", "impact", "adaptch", "adaptrct", "ring", "romi", "korley")
+
+#================================#
+# Geographic Area
+#================================#
+europe <- c("lancet","gender","circ","trust","stockport", "manchester","apace","bacc","tiamo","stenocardia")
+na <- c("utropia","ring", "romi", "korley")
+aus <- c("edacs","adaptbr", "impact", "adaptch", "adaptrct")
+
+
+#NPV for hsTnI alone
+df2 <- df.assay[rownames(df.assay) %in% c(hstni),]
+tni.master <- metaestimate(df2, "hsTnI", "hsTnI Cohorts")
+tni.master[,c(2:4)] <- round((tni.master[,c(2:4)]),digits=1)
+
+#NPV for hsTnT 
+df3 <- df.assay[rownames(df.assay) %in% c(hstnt),]
+tnt.master <- metaestimate(df3, "hsTnT", "hsTnT Cohorts")
+tnt.master[,c(2:4)] <- round((tnt.master[,c(2:4)]),digits=1)
+
+#NPV for contemp
+df4 <- df.assay[rownames(df.assay) %in% c(contemp),]
+contemp.master <- metaestimate(df4, "Contemp", "Contemporary Cohorts")
+contemp.master[,c(2:4)] <- round((contemp.master[,c(2:4)]),digits=1)
+
+tni.master$Group <- c("Pooled NPV TnI")
+contemp.master$Group <- c("Pooled NPV Contemporary")
+tnt.master$Group <- c("Pooled NPV TnT")
+
+#NPV for low bias
+df.low <- df.assay[rownames(df.assay) %in% c(low),]
+low.master <- metaestimate(df.low, "Low risk of bias", "Low Bias")
+low.master[,c(2:4)] <- round((low.master[,c(2:4)]),digits=1)
+
+#NPV for high bias
+df.high <- df.assay[rownames(df.assay) %in% c(high),]
+high.master <- metaestimate(df.high, "High risk of bias", "High Bias")
+high.master[,c(2:4)] <- round((high.master[,c(2:4)]),digits=1)
+
+#NPV for Europe
+df.eur <- df.assay[rownames(df.assay) %in% c(europe),]
+eur.master <- metaestimate(df.eur, "Europe", "Europe")
+eur.master[,c(2:4)] <- round((eur.master[,c(2:4)]),digits=1)
+
+#NPV for N. America
+df.na <- df.assay[rownames(df.assay) %in% c(na),]
+na.master <- metaestimate(df.na, "North America", "NA")
+na.master[,c(2:4)] <- round((na.master[,c(2:4)]),digits=1)
+
+#NPV for Australasia
+df.aus <- df.assay[rownames(df.assay) %in% c(aus),]
+aus.master <- metaestimate(df.aus, "Asia Pacific", "Aus")
+aus.master[,c(2:4)] <- round((aus.master[,c(2:4)]),digits=1)
+
+summary.master[,c(2:4)] <- round((summary.master[,c(2:4)]),digits=1)
+
+
+#need to confirm variance if add new cohorts
+
+fig1 <- rbind(space, tni.master, contemp.master, tnt.master, space1, high.master, low.master, space2, aus.master, eur.master, na.master, space3, summary.master)
+fig1$Group <- factor(fig1$Group)
+fig1$prop <- fig1$n
+fig1$size <- 15
+fig1$prev <- paste0(round(fig1$test,1)," ","(",round(fig1$lower,1),"-",round(fig1$upper,1),")")
+fig1$colour <- c("white","#AF523D","gray","#4A6A7F","white","#AF523D","dark gray","white","dark green", "blue","red", "white","black")
+
+theme_set(theme_bw())
+theme_update(
+        axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(size=14),
+        axis.title.x = element_text(size=14),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        plot.margin = unit(c(0,0,0,0), "lines")
+)
+
+
+p1 <- ggplot(fig1,aes(test,rev(Group),)) + 
+        geom_errorbarh(aes(xmax = upper, xmin = lower), size=0.4, height = 0.15, col="black") +
+        geom_segment(aes(x=99.5,y=-0.1,xend=99.5,yend=12.5),colour="dark gray",size=0.2, linetype=2)+
+        geom_point(size=(fig1$size), shape=18, col=fig1$colour) +
+        geom_hline(aes(yintercept=9), linetype=2,colour = "gray55")+
+        geom_hline(aes(yintercept=6), linetype=2,colour = "gray55")+
+        geom_hline(aes(yintercept=1.5), linetype=2,colour = "gray55")+
+        scale_x_continuous(breaks = seq(90,100,.5), labels = seq(90,100,.5)) +
+        labs(x="Negative Predictive Value (95% CI)", y="")+
+        coord_cartesian(ylim=c(0,14),xlim=c(98,100.1))+
+        annotate("rect", xmin = 99.2, xmax = 99.6, ymin = -0.1, ymax = 12.5,
+                 alpha = .2, fill="light grey")
+p1
+
+#once plotted, remove NA to create blank space in data_table
+fig1$TN[ is.na(fig1$TN)] <- ""
+fig1$FN[ is.na(fig1$FN)] <- ""
+fig1$n[ is.na(fig1$n)] <- ""
+
+a <- rep(c(letters[1:13]),5)
+b <- rep(c(1:5),each=13)
+c <- c("", "hs-cTnI assay", "Contemporary assay", "hs-cTnT assay", 
+       "", "High", "Low", "", "Asia Pacific", "Europe", "North America", "", "", 
+       "","","","","","","","","","","","","",fig1$FN,fig1$TN,fig1$n)
+d<- as.data.frame(cbind(a,b,c))
+d$a <- factor(d$a, levels=c(letters[13:1]))
+
+data_table <- ggplot(d, aes(x = d$b, y = d$a, label = format(d$c, nsmall = 1))) +
+        geom_text(size = 6, hjust=0, vjust=0) + theme_bw()  + 
+        geom_hline(aes(yintercept=9), linetype=2,colour = "gray55")+
+        geom_hline(aes(yintercept=6), linetype=2,colour = "gray55")+
+        geom_hline(aes(yintercept=1.5), linetype=2,colour = "gray55")+
+        theme(panel.grid.major = element_blank(), 
+              legend.position = "none",
+              panel.border = element_blank(), 
+              axis.text.x = element_text(colour="white"),#element_blank(),
+              axis.text.y = element_blank(), 
+              axis.ticks = element_line(colour="white"),#element_blank(),
+              plot.margin = unit(c(0,0,0,0), "lines")) +
+        labs(x="",y="") +
+        coord_cartesian(xlim=c(1,6),ylim=c(-0.05,14))
+
+f <- data_table
+f <- f + annotate("text", x = 1, y = 1, label = "Summary", size=6, fontface='bold',hjust=0, vjust=0)
+f <- f + annotate("text", x = 1, y = 5.5, label = "Recruitment location", size=6, fontface='bold',hjust=0, vjust=0)
+f <- f + annotate("text", x = 1, y = 8.5, label = "Bias assessment", size=6, fontface='bold',hjust=0, vjust=0)
+f <- f + annotate("text", x = 1, y = 12.5, label = "Adjudication assay", size=6, fontface='bold',hjust=0, vjust=0)
+f <- f + annotate("text", x = 1, y = 13, label = "Group", size=6, fontface='bold',hjust=0, vjust=0)
+f <- f + annotate("text", x = 3, y = 13, label = "FN", size=6, fontface='bold',hjust=0, vjust=0)
+f <- f + annotate("text", x = 4, y = 13, label = "TN", size=6, fontface='bold',hjust=0, vjust=0)
+f <- f + annotate("text", x = 5, y = 13, label = "Total (n)", size=6, fontface='bold',hjust=0, vjust=0)
+f
+
+t2 <- grid.arrange(f, p1, ncol=2)
+
+#===============================
+# Supplementary Table 1 – Missed cases – obtained using ‘missed.cases’ function 
+#===============================
+#===============================
+# Supplementary Table 2 – 2x2 and Diagnostic Parameters per cohort for <99th centile
+#===============================
+table.two <- rbind(shah.dx.table,gender.dx.table,chapman.dx.table,trust.dx.table,adaptbr.dx.table,impact.dx.table,romi.dx.table,ring.dx.table,hopkins.dx.table,tiamo.dx.table,apace.dx.table,edacs.dx.table,adaptrct.dx.table,adaptch.dx.table, utropia.dx.table, bacc.dx.table, stenocardia.dx.table, stockport.dx.table, manchester.dx.table)
+
+df2 <- matrix(c(sum(table.two$TN),sum(table.two$FN),sum(table.two$FP),sum(table.two$TP)),byrow=TRUE,2,2)
+
+npv5 <- binom.bayes(x=df2[1,1], n=df2[1,2]+df2[1,1], conf.level=0.95, type=c("central"), prior.shape1=0.5, prior.shape2=0.5, tol=1e-9)
+
+#round to 2 DPs
+for(i in c(6:12)) {
+        table.two[,i] <- round(table.two[,i], digits=1)
+}
+
+#reorder as per variance
+table.two <- table.two[c(1,15,3,2,12,17,5,6,7,9,14,13,8,10,11,16,4,18,19),]
+
+table.two$npv.est <- paste(table.two$npvtest," (",table.two$npvlower,"-",table.two$npvupper,") ", sep="")
+table.two$sens.est <- paste(table.two$senstest," (",table.two$senslower,"-",table.two$sensupper,") ", sep="")
+
+table.two <- table.two[,c(1:5,13,14,12)]
+
+#============================
+# Supplementary Table 3 – 30 day and 1 year outcomes 
+#============================
+# DATASET = cohorts of raw data where cardiac death at 30 days and 1 year is available.
+# Excludes TI-AMO, ROMI, RING, STENOCARDIA, HOPKINS, STOCKPORT, MANCHESTER [no cardiac death outcomes], APACE and UTROPIA [aggregate data]
+
+longterm <- rbind(shah.all, chapman.all, adaptbr.all, gender.all, impact.all,  edacs.all, adaptrct.all, adaptch.all, bacc.all, trust.all)
+
+##### For <5 ng/L at index presentation 
+
+### 30 days
+
+#restrict dataset to those with 30d cardiac death information available
+longterm.30d <- longterm[ !is.na(longterm$death.30),]
+
+#determine number of patients <5 (denominator)
+longterm.30d.five <- subset(longterm.30d, less.5==0)
+
+#determine number of patients with cardiac death @ 1Y (numerator)
+five.30d.events <- subset(longterm.30d.five, death.30==1)
+
+#calculate event rate
+five.30d.rate <- (nrow(five.30d.events)/nrow(longterm.30d.five)) * 100
+
+
+### 1 YEAR
+
+#restrict dataset to those with 1y cardiac death information available
+longterm.1y <- longterm[ !is.na(longterm$death.1y),]
+
+#determine number of patients (denominator)
+longterm.1y.five <- subset(longterm.1y, less.5==0)
+
+#determine number of patients with cardiac death @ 1Y (numerator)
+five.1y.events <- subset(longterm.1y.five, death.1y==1)
+
+#calculate event rate
+five.1y.rate <- (nrow(five.1y.events)/nrow(longterm.1y.five)) * 100
+
+Group <- "<5 ng/L at presentation"
+n.30 <- nrow(longterm.30d.five)
+n.1y <- nrow(longterm.1y.five)
+n.event.30 <- nrow(five.30d.events)
+n.event.1y <- nrow(five.1y.events)
+five.table <- data.frame(Group,n.30,n.event.30,five.30d.rate,n.1y,n.event.1y,five.1y.rate)
+names(five.table) <- c("Group","30 day outcomes (n)", "30 day events (n)", "30 day events (%)", "1 year outcomes (n)", "1 year events (n)", "1 year events (%)")
+
+
+##### For >5 ng/L <99th at index presentation  
+
+### 30 days
+
+#restrict dataset to those with 30d cardiac death information available
+longterm.30d <- longterm[ !is.na(longterm$death.30),]
+
+#determine number of patients (denominator)
+longterm.30d.over.five <- subset(longterm.30d, less.5==1&tni.pos==0)
+
+#determine number of patients with cardiac death @ 1Y (numerator)
+over.five.30d.events <- subset(longterm.30d.over.five, death.30==1)
+
+#calculate event rate
+over.five.30d.rate <- (nrow(over.five.30d.events)/nrow(longterm.30d.over.five)) * 100
+
+
+### 1 YEAR
+
+#restrict dataset to those with 1y cardiac death information available
+longterm.1y <- longterm[ !is.na(longterm$death.1y),]
+
+#determine number of patients (denominator)
+longterm.1y.over.five <- subset(longterm.1y, less.5==1&tni.pos==0)
+
+#determine number of patients with cardiac death @ 1Y (numerator)
+over.five.1y.events <- subset(longterm.1y.over.five, death.1y==1)
+
+#calculate event rate
+over.five.1y.rate <- (nrow(over.five.1y.events)/nrow(longterm.1y.over.five)) * 100
+
+Group <- "≥5 ng/L <99th centile at presentation"
+n.30 <- nrow(longterm.30d.over.five)
+n.1y <- nrow(longterm.1y.over.five)
+n.event.30 <- nrow(over.five.30d.events)
+n.event.1y <- nrow(over.five.1y.events)
+over.five.table <- data.frame(Group,n.30,n.event.30,over.five.30d.rate,n.1y,n.event.1y,over.five.1y.rate)
+names(over.five.table) <- c("Group","30 day outcomes (n)", "30 day events (n)", "30 day events (%)", "1 year outcomes (n)", "1 year events (n)", "1 year events (%)")
+
+##### For >99th at index presentation 
+
+### 30 days
+
+#restrict dataset to those with 30d cardiac death information available
+longterm.30d <- longterm[ !is.na(longterm$death.30),]
+
+#determine number of patients
+longterm.30d.over.99 <- subset(longterm.30d, less.5==1&tni.pos==1)
+
+#determine number of patientswith cardiac death @ 1Y (numerator)
+over.99.30d.events <- subset(longterm.30d.over.99, death.30==1)
+
+#calculate event rate
+over.99.30d.rate <- (nrow(over.99.30d.events)/nrow(longterm.30d.over.99)) * 100
+
+### 1 YEAR
+
+#restrict dataset to those with 1y cardiac death information available
+longterm.1y <- longterm[ !is.na(longterm$death.1y),]
+
+#determine number of patients with index MI (denominator)
+longterm.1y.over.99 <- subset(longterm.1y, less.5==1&tni.pos==1)
+
+#determine number of patients with index MI with cardiac death @ 1Y (numerator)
+over.99.1y.events <- subset(longterm.1y.over.99, death.1y==1)
+
+#calculate event rate
+over.99.1y.rate <- (nrow(over.99.1y.events)/nrow(longterm.1y.over.99)) * 100
+
+Group <- ">99th centile at presentation"
+n.30 <- nrow(longterm.30d.over.99)
+n.1y <- nrow(longterm.1y.over.99)
+n.event.30 <- nrow(over.99.30d.events)
+n.event.1y <- nrow(over.99.1y.events)
+over.99.table <- data.frame(Group,n.30,n.event.30,over.99.30d.rate,n.1y,n.event.1y,over.99.1y.rate)
+names(over.99.table) <- c("Group","30 day outcomes (n)", "30 day events (n)", "30 day events (%)", "1 year outcomes (n)", "1 year events (n)", "1 year events (%)")
+
+longterm.table <- rbind(five.table,over.five.table,over.99.table)
+
+#round to 2 DPs
+for(i in c(4,7)) {
+        longterm.table[,i] <- round(longterm.table[,i], digits=1)
+}
+
+#============================
+# Supplementary Table 4 – Generate Table S4 
+#============================
+
+#Table S4 uses raw data plotted in Figure 3 (npv dataframe)
+
+npvdf <- npv
+
+#generate FN rate and 95% CI per 1,000 patients
+rate.test <- binom.bayes(x=npvdf$FN, n=npvdf$FN + npvdf$TN, conf.level=0.95, type=c("central"), prior.shape1=0.5, prior.shape2=0.5, tol=1e-9)
+
+npvdf$rate <- round(rate.test$mean*1000,digits=1)
+npvdf$rate.l <- round(rate.test$lower*1000,digits=1)
+npvdf$rate.u <- round(rate.test$upper*1000,digits=1)
+
+npvdf$prop <- round(npvdf$prop,digits=1)
+
+#paste npvs
+npvdf$npv.est <- paste(npvdf$central," (",npvdf$ll,"-",npvdf$ul,") ", sep="")
+
+#paste sens
+npvdf$sens.est <- paste(npvdf$sens.t," (",npvdf$sens.l,"-",npvdf$sens.u,") ", sep="")
+
+#paste rate
+npvdf$rate.est <- paste(npvdf$rate," (",npvdf$rate.l,"-",npvdf$rate.u,") ", sep="")
+
+#reorder
+npvdf <- npvdf[,c(1:5,19,17,18,12,13)]
+names(npvdf) <- c("Troponin", "TP", "FP", "TN", "FN", "FN per 1000 patients (Mean, 95%CI)", "NPV (Mean, 95%CI)", "Sensitivity (Mean, 95%CI)", "Proportion", "Group")
+
+
+#=====================================#
+# Resubmission #1 09.08.2017
+#=====================================#
+
+#Compare odds ratios for subgroup analyses
+#merge dataset
+master.subgroup <- subset(master, less.5==0)
+
+# recode factor levels for gender
+master.subgroup$gender <- as.character(master.subgroup$gender)
+master.subgroup$gender[master.subgroup$gender=="F"] <- 1
+master.subgroup$gender[master.subgroup$gender=="M"] <- 0
+master.subgroup$gender <- as.numeric(master.subgroup$gender)
+
+#split into list by cohort
+mylist <- split(master.subgroup, master.subgroup$cohort.name)
+
+#generate subgroup estimates
+make.subgroup <- function(varname){
+        master.subgroup$x <- master.subgroup[,varname]
+        agg <- master.subgroup %>%
+                filter(!is.na(x)) %>%
+                group_by(cohort.name, x, primary.outcome) %>% 
+                count() %>% 
+                mutate(col_heads=paste0(x,primary.outcome)) %>% 
+                ungroup() %>%
+                select(-x, -primary.outcome) %>%
+                spread(key = col_heads, value=n, fill=0) 
+        names(agg) <- c("cohort.name","grp0_out0","grp0_out1","grp1_out0","grp1_out1")
+        agg 
+}
+
+varlist <- c("known.ihd", "over.65", "gender", "less.2hr.sx", "ecg.ischaemia")
+names(varlist) <- c("known.ihd", "over.65", "gender", "less.2hr.sx", "ecg.ischaemia")
+
+vardata <- lapply(varlist,make.subgroup)
+
+#generate OR and P value for comparison
+var.odds <- function(varlist){
+        temp <- escalc(measure="OR", ai=grp1_out1, bi=grp1_out0, ci=grp0_out1, di=grp0_out0, data=vardata[[varlist]])
+        rma(yi, vi, data=temp)
+}
+
+var.odds.dat <- lapply(varlist,var.odds)
+
+predict(var.odds.dat$over.65, transf=exp, digits=3)
+predict(var.odds.dat$known.ihd, transf=exp, digits=3)
+predict(var.odds.dat$ecg.ischaemia, transf=exp, digits=3)
+predict(var.odds.dat$less.2hr.sx, transf=exp, digits=3)
+predict(var.odds.dat$gender, transf=exp, digits=3)
+
+#Comparing NPV by assay
+df.comp <- df.assay
+
+df.comp$assay <- c("hstni","hstni","hstni","hstnt","contemp","contemp","contemp","contemp","contemp","hstnt","hstnt","hstni","contemp","contemp","hstni","hstnt","contemp","hstnt","hstnt")
+df.comp$bias <- c("low", "low", "low", "high", "high", "high", "high", "high", "high", "low", "low", "low", "high", "high", "low", "low", "high", "high", "high")
+df.comp$loc <- c("eur","eur","eur", "eur", "aus", "aus", "na", "na", "na", "eur", "eur", "aus", "aus", "aus", "na","eur","eur","eur","eur")
+df.comp$outcome <- c("a","a","a","a","a","a","b","b","b","b","b","a","a","a","a","a","b","b","b")
+
+dat.assay <- escalc(measure="RR", ai=TP, bi=FP, ci=FN, di=TN, data=df.comp)
+
+dat.assay.rma <- rma(yi, vi, mods = ~ assay, data=dat.assay, digits=3)
+dat.bias.rma <- rma(yi, vi, mods = ~ bias, data=dat.assay, digits=3)
+dat.loc.rma <- rma(yi, vi, mods = ~ loc, data=dat.assay, digits=3)
+dat.out.rma <- rma(yi, vi, mods = ~ outcome, data=dat.assay, digits=3)
+
+# Split composite endpoints where IPD avaliable
+type1.outcomes <- rbind(lancet.sens.outcome, gender.sens.outcome, circ.sens.outcome, adaptch.sens.outcomes, adaptrct.sens.outcomes, edacs.sens.outcomes, adaptbr.sens.outcomes, impact.sens.outcomes, bacc.sens.outcomes, trust.sens.outcomes)
+type1.outcomes <- type1.outcomes[,c(1,16,27,28)]
+
+type1.outcomes.2 <- rbind(stenocardia, romi, korley, ring, tiamo, stockport, manchester)
+type1.outcomes.2$index.type1mi <- type1.outcomes.2$primary.outcome
+type1.outcomes.2 <- type1.outcomes.2[,c(1,16,27,31)]
+
+type1.outcomes <- rbind(type1.outcomes, type1.outcomes.2)
+type1.outcomes$less.5 <- ifelse(type1.outcomes$first.hstni<5,0,1)
+
+#generate split composite outcomes 2x2 data
+make.outcomes <- function(outcome){
+        type1.outcomes$x <- type1.outcomes[,outcome]
+        agg <- type1.outcomes %>%
+                filter(!is.na(x)) %>%
+                group_by(cohort.name, less.5, x) %>% 
+                count() %>% 
+                mutate(col_heads=paste0(less.5,x)) %>% 
+                ungroup() %>%
+                select(-x, -less.5) %>%
+                spread(key = col_heads, value=n, fill=0) 
+        names(agg) <- c("cohort.name","TN","FN","FP","TP")
+        agg 
+}
+
+var.outcomes <- c("index.type1mi","death.30")
+names(var.outcomes) <- c("index.type1mi","death.30")
+
+var.type1 <- make.outcomes("index.type1mi")
+summary.t1.master <- metaestimate(var.type1, "type1", "Summary")
+
+var.out.dat <- lapply(var.outcomes, make.outcomes)
+
+
+#generate meta-estimate with above DF using RMA
+summary.death.master <- metaestimate(death.30, "death", "Summary")
+
+#ROC Curve
+library(pROC)
+
+#all
+population <- rbind(lancet.all, gender.all, circ.all, adaptbr.all, impact.all, romi.all, ring.all, korley.all, edacs.all, adaptrct.all, adaptch.all, stenocardia.all, bacc.all, tiamo.all, trust.all, stockport.all, manchester.all)
+roc.master <- plot.roc(population$primary.outcome, population$first.hstni,  main="hsTnI at presentation in all patients", percent=TRUE,  ci=F, col="blue", of="thresholds", print.thres="best")
+
+#<99th centile
+population <- subset(population, tni.pos==0)
+roc.master <- plot.roc(population$primary.outcome, population$first.hstni,  main="hsTnI at presentation in patients <99th centile", percent=TRUE,  ci=F, col="blue", of="thresholds", print.thres="best")
+
+
+#eggers test for bias in previously published datasets
+df.assay.eggers <- df.assay[c(1,2,3,4,5,7,14,15,16,18,19),]
+res <- rma.glmm(measure="PLO", xi=df.assay.eggers$TN, ni=(df.assay.eggers$TN + df.assay.eggers$FN), data=df.assay.eggers)
+ranktest(res)
+
+#NPV cardiac death 30d
+binom.bayes(x=6956, n=6956, conf.level=0.95, type=c("central"), prior.shape1=0.5, prior.shape2=0.5, tol=1e-9)
+
+#Sens cardiac death 30d
+binom.bayes(x=81, n=81, conf.level=0.95, type=c("central"), prior.shape1=0.5, prior.shape2=0.5, tol=1e-5)
+
+#NPV cardiac death 1y
+binom.bayes(x=5054, n=5054+7, conf.level=0.95, type=c("central"), prior.shape1=0.5, prior.shape2=0.5, tol=1e-9)
+
+#Sens cardiac death 1y
+binom.bayes(x=125+58, n=125+58+7, conf.level=0.95, type=c("central"), prior.shape1=0.5, prior.shape2=0.5, tol=1e-9)
+
+
+#determine 30d and 1y outcomes per threshold 
+
+agg <- longterm.1y %>%
+        group_by(first.hstni) %>%
+        count()
+
+agg$sum <- cumsum(agg$n)
+agg$c.death <- c(0,0,1,4,7,8,9,14,14,14,14,20,23,26,28,32,32)
+agg$prop <- agg$c.death/agg$sum
+agg$prop <- round(agg$prop*100, digits=1)
+
+
+agg2 <- longterm.30d %>%
+        group_by(first.hstni) %>%
+        count()
+
+agg2$sum <- cumsum(agg2$n)
+agg2$c.death <- c(0,0,0,0,0,0,1,1,1,1,1,2,2,3,6,6,6)
+agg2$prop <- agg2$c.death/agg2$sum
+agg2$prop <- round(agg2$prop*100, digits=1)
+
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          
